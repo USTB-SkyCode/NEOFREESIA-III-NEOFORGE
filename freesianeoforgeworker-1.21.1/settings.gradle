@@ -4,8 +4,21 @@ pluginManagement {
     }
 }
 
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
 // 本机专用设置（代理、国内镜像等）放到未被 git 跟踪的 gradle-local.properties。
 // 该文件不存在时静默跳过，因此 CI（GitHub Actions）与其它机器都能正常构建。
+//
+// 注意：这段必须放在 plugins {} 之后。
+// Gradle 规定 settings 脚本里 plugins {} 之前只能出现 buildscript {}、pluginManagement {}
+// 和 plugins {} 三种块，任何其它语句（例如这里的 def / if）都会导致
+// "only buildscript {}, pluginManagement {} and other plugins {} script blocks are allowed
+// before plugins {} blocks" 编译失败。
+// 代价是：它无法影响 settings 自身 plugins {} 里那个 foojay 插件的解析。
+// 若你的机器连插件门户都需要代理，请把 systemProp.* 同时写进
+// GRADLE_USER_HOME/gradle.properties（Gradle 官方支持的本机配置位置）。
 def localProperties = new File(settingsDir, 'gradle-local.properties')
 if (localProperties.exists()) {
     def props = new Properties()
@@ -15,8 +28,4 @@ if (localProperties.exists()) {
             System.setProperty(key.toString(), value.toString())
         }
     }
-}
-
-plugins {
-    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
 }

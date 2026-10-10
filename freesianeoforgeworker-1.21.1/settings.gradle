@@ -4,6 +4,19 @@ pluginManagement {
     }
 }
 
+// 本机专用设置（代理、国内镜像等）放到未被 git 跟踪的 gradle-local.properties。
+// 该文件不存在时静默跳过，因此 CI（GitHub Actions）与其它机器都能正常构建。
+def localProperties = new File(settingsDir, 'gradle-local.properties')
+if (localProperties.exists()) {
+    def props = new Properties()
+    localProperties.withInputStream { props.load(it) }
+    props.each { key, value ->
+        if (System.getProperty(key.toString()) == null) {
+            System.setProperty(key.toString(), value.toString())
+        }
+    }
+}
+
 plugins {
     id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
 }

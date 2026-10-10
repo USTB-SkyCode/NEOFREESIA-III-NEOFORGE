@@ -4,6 +4,9 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/**/build/
 
+### 本机专用设置（代理 / 镜像等），不要入库 ###
+gradle-local.properties
+
 ### IntelliJ IDEA ###
 .idea/
 *.iws

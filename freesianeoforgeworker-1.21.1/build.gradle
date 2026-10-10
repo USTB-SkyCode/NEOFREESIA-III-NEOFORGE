@@ -28,16 +28,24 @@ sourceSets.main.resources {
 }
 
 repositories {
-    // Replace Mojang's "libraries.minecraft.net" with the BMCLAPI mirror.
-    // The proxy at 127.0.0.1:7897 drops the TLS handshake to Mojang's CDN
-    // ("Remote host terminated the handshake"), so resolve those libs from BMCLAPI instead.
-    def mojangRepo = findByName("Mojang")
-    if (mojangRepo != null) {
-        remove(mojangRepo)
-    }
-    maven {
-        name = "Mojang"
-        url = "https://bmclapi2.bangbang93.com/maven/"
+    // BMCLAPI 只是「中国大陆直连 Mojang CDN 不畅时」的镜像，并不是所有机器都需要。
+    // 默认（CI、海外机器）保留 ModDevGradle 自带的官方 Mojang 仓库；
+    // 只有在本机 gradle-local.properties 里显式打开时，才替换成 BMCLAPI。
+    // 注意：BMCLAPI 与官方仓库的构件校验值一致，但可用性受其服务状态影响，
+    // 所以不要无条件替换，否则 CI 会被一个第三方镜像的单点故障拖住。
+    // 开关来源有两个：settings.gradle 从 gradle-local.properties 注入的 system property，
+    // 或者命令行 -PuseBmclapiMojangMirror=true。默认关闭。
+    def useBmclapiMirror = (System.getProperty('useBmclapiMojangMirror')
+            ?: providers.gradleProperty('useBmclapiMojangMirror').getOrElse('false')) == 'true'
+    if (useBmclapiMirror) {
+        def mojangRepo = findByName("Mojang")
+        if (mojangRepo != null) {
+            remove(mojangRepo)
+        }
+        maven {
+            name = "Mojang"
+            url = "https://bmclapi2.bangbang93.com/maven/"
+        }
     }
 }
 

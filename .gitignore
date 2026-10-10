@@ -1,0 +1,30 @@
+# ---- Gradle ----
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/**/build/
+
+# ---- 本机专用设置（代理 / 镜像等），不要入库 ----
+gradle-local.properties
+
+# ---- IDE ----
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+
+# ---- 运行目录 / 生成物 ----
+run/
+run-data/
+**/src/generated/**/.cache/
+repo/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db

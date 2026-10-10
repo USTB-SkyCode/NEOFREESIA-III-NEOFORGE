@@ -1,0 +1,22 @@
+# 本机专用设置示例。
+#
+# 用法：复制成 gradle-local.properties（该文件名已被 .gitignore 忽略），按需修改。
+#   copy gradle-local.properties.example gradle-local.properties
+#
+# 由 settings.gradle 读取，并把每一条转成 JVM system property。
+# 之所以不直接写进 gradle.properties：那个文件是入库的，
+# 而代理/镜像只对特定机器成立 —— 写死后 GitHub Actions 会连不上任何仓库。
+
+# ---- 需要走 HTTP 代理才能访问境外仓库时，取消下面四行的注释并改成你的地址 ----
+# systemProp.http.proxyHost=127.0.0.1
+# systemProp.http.proxyPort=7897
+# systemProp.https.proxyHost=127.0.0.1
+# systemProp.https.proxyPort=7897
+
+# ---- 代理下需要直连的域名（例如国内镜像）----
+# systemProp.http.nonProxyHosts=bmclapi2.bangbang93.com
+# systemProp.https.nonProxyHosts=bmclapi2.bangbang93.com
+
+# ---- 中国大陆直连 Mojang CDN 不畅时，设为 true 改用 BMCLAPI 镜像 ----
+# 默认 false：保留 ModDevGradle 自带的官方 Mojang 仓库。
+# useBmclapiMojangMirror=true

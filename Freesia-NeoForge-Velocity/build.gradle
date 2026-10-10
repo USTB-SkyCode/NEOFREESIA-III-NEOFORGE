@@ -57,6 +57,16 @@ shadowJar {
     mergeServiceFiles()
 }
 
+// shadowJar 的 classifier 是空串，而普通 jar 的 classifier 默认也是空串，
+// 于是两者都会写出 Freesia-NeoForge-Velocity-<version>.jar —— 谁后执行谁覆盖。
+// 也就是说「未打包依赖的薄 jar 覆盖掉 shaded jar」是可能发生的，
+// 而这个错误会一路潜伏到部署时才以 NoClassDefFoundError 爆出来。
+// 给薄 jar 一个显式 classifier，让两个产物档名不再相等（保持 jar 任务可用，
+// 避免影响 shadowJar 自身的任务图）。
+tasks.named('jar') {
+    archiveClassifier = 'thin'
+}
+
 tasks.named('build') {
     dependsOn tasks.named('shadowJar')
 }

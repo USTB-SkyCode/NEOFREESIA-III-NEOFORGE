@@ -1,0 +1,12 @@
+# 本仓库在 Windows 上开发，但 CI 跑在 Linux runner 上。
+# 若 core.autocrlf=true，gradlew 会被检出成 CRLF，
+# 在 Linux/容器里执行会直接报 "bad interpreter"。
+# 这里显式钉死行尾，保证任何平台检出后都能直接运行。
+* text=auto
+
+gradlew text eol=lf
+*.sh    text eol=lf
+*.bat   text eol=crlf
+*.jar   binary
+*.png   binary
+*.zip   binary

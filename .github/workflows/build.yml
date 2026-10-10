@@ -1,0 +1,144 @@
+name: Build
+
+# 两个组件各自是独立 Gradle 工程（没有聚合 settings.gradle），
+# 所以下面是两个并行 job，而不是一次 ./gradlew build。
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支连续推送时，取消上一次尚未跑完的构建，避免排队浪费额度。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Velocity 代理端插件
+  # ---------------------------------------------------------------------------
+  velocity-plugin:
+    name: Velocity plugin
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Freesia-NeoForge-Velocity
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 仓库里已把 gradlew 的权限位设为 100755，因此正常情况下无需 chmod。
+      # 这里仍然兜底一次：Windows 上提交的历史提交很容易把它重置成 100644。
+      - name: Ensure gradlew is executable
+        run: chmod +x ./gradlew
+
+      # `build` 会经 check -> regressionTest 跑回归套件，这里再显式写一次只是为了
+      # 让 CI 日志里有独立的 :regressionTest 任务块，便于排查。
+      # SwitchRegressionTest 用内存中的 Velocity 接口桩驱动真实的
+      # MapperManager / YsmPacketProxy，跑 45 项断言。
+      # 注意：它不会启动真实的 Minecraft 客户端/服务端。
+      - name: Build plugin and run regression suite
+        run: ./gradlew build regressionTest --stacktrace
+
+      - name: Show artifacts
+        run: ls -lh build/libs
+
+      # build.gradle 里 jar 与 shadowJar 的档名本会撞在一起
+      # （shadowJar 的 archiveClassifier 为空串），已给薄 jar 加 'thin' classifier 区分。
+      # 这里断言交付物确实是 shaded jar —— 「把未打包依赖的薄 jar 当成成品发出去」
+      # 是个能一路混到部署才炸的隐蔽错误。
+      - name: Verify the jar is actually shaded
+        run: |
+          set -euo pipefail
+          ls -lh build/libs
+          jar=$(ls -1 build/libs/*.jar | grep -v -- '-thin\.jar$' || true)
+          if [ -z "$jar" ]; then
+            echo "::error::build/libs 下没有找到 shaded jar。"
+            exit 1
+          fi
+          if [ "$(echo "$jar" | wc -l)" -ne 1 ]; then
+            echo "::error::期望恰好一个 shaded jar，实际匹配到多个：$jar"
+            exit 1
+          fi
+          # 依赖被 shadowJar 打进包内才说明这是可部署的产物。
+          if ! unzip -l "$jar" | grep -q 'org/geysermc/mcprotocollib'; then
+            echo "::error::$jar 里没有 MCPRotocolLib，说明它是未打包依赖的薄 jar，不能用于部署。"
+            exit 1
+          fi
+          if ! unzip -l "$jar" | grep -q 'velocity-plugin.json'; then
+            echo "::error::$jar 里缺少 velocity-plugin.json，Velocity 无法加载。"
+            exit 1
+          fi
+          echo "OK: $jar 是含 MCPRotocolLib 的 shaded jar。"
+
+      - name: Upload plugin jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: Freesia-NeoForge-Velocity
+          # shadowJar 已把 classifier 置空，因此产物名形如
+          # Freesia-NeoForge-Velocity-1.0.3-diagnostic.jar；
+          # 显式排除同目录下的 *-thin.jar（未打包依赖，不可部署）。
+          # 用通配符，避免每次改版本号都要动这个文件。
+          path: |
+            Freesia-NeoForge-Velocity/build/libs/*.jar
+            !Freesia-NeoForge-Velocity/build/libs/*-thin.jar
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 2) NeoForge 1.21.1 Worker 节点 Mod
+  # ---------------------------------------------------------------------------
+  worker-mod:
+    name: Worker mod (NeoForge 1.21.1)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: freesianeoforgeworker-1.21.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Ensure gradlew is executable
+        run: chmod +x ./gradlew
+
+      # Worker 的构建需要下载并反编译整个 Minecraft（ModDevGradle / NeoForm），
+      # 这一步比较慢，且对磁盘空间敏感。先确认 runner 空间充足，
+      # 免得跑到一半失败却看不出原因。
+      - name: Check free disk space
+        run: df -h /
+
+      - name: Build mod
+        run: ./gradlew build --stacktrace
+
+      - name: Show artifacts
+        run: ls -lh build/libs
+
+      - name: Upload mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: freesianeoforgeworker
+          path: |
+            freesianeoforgeworker-1.21.1/build/libs/*.jar
+            !freesianeoforgeworker-1.21.1/build/libs/*-sources.jar
+          if-no-files-found: error

@@ -5,8 +5,9 @@ import com.github.retrooper.packetevents.event.PacketListener;
 import com.github.retrooper.packetevents.event.PacketListenerPriority;
 import com.github.retrooper.packetevents.event.PacketSendEvent;
 import com.github.retrooper.packetevents.protocol.packettype.PacketType;
-import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerJoinGame;
-import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSpawnPlayer;
+import com.nguyendevs.freesia.neoforge.util.EntityPacketReader;
+import io.netty.buffer.ByteBuf;
+import com.github.retrooper.packetevents.protocol.ConnectionState;
 import com.google.inject.Inject;
 import com.nguyendevs.freesia.neoforge.mapper.MapperManager;
 import com.nguyendevs.freesia.neoforge.mapper.MapperSession;
@@ -26,6 +27,7 @@ import org.slf4j.Logger;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 
 /**
  * Freesia II-like YSM proxy for NeoForge 1.21.1.
@@ -74,9 +76,16 @@ public class FreesiaNeoForge implements PacketListener {
     @Subscribe
     public EventTask onServerConnected(ServerConnectedEvent event) {
         final Player player = event.getPlayer();
+        this.logger.info("[Freesia-DIAG] BACKEND_CONNECTED player={} server={}",
+                player.getUsername(), event.getServer().getServerInfo().getName());
         return EventTask.async(() -> {
-            this.mapperManager.createSession(player);
-            this.logger.info("[Freesia] Mapper session created for {}", player.getUsername());
+            MapperSession session = this.mapperManager.createSession(player);
+            for (long delay : new long[]{10, 30}) {
+                this.server.getScheduler().buildTask(this, session::reportStatus)
+                        .delay(delay, TimeUnit.SECONDS).schedule();
+            }
+            this.logger.info("[Freesia] Mapper session allocated/reused for {}; Worker login status is logged separately",
+                    player.getUsername());
         });
     }
 
@@ -107,30 +116,68 @@ public class FreesiaNeoForge implements PacketListener {
 
     @Override
     public void onPacketSend(PacketSendEvent event) {
+        if (this.mapperManager == null || event.isCancelled()) return;
+        final Player target = event.getPlayer();
+        if (target == null) return;
+        try {
         if (event.getPacketType() == PacketType.Play.Server.JOIN_GAME) {
-            final WrapperPlayServerJoinGame join = new WrapperPlayServerJoinGame(event);
-            final Player target = event.getPlayer();
-            if (target != null) {
-                this.mapperManager.onBackendEntityId(target.getUniqueId(), join.getEntityId());
-                this.logger.info("[Freesia] Backend entity id for {} = {}",
-                        target.getUsername(), join.getEntityId());
+            int entityId = EntityPacketReader.join((ByteBuf) event.getByteBuf());
+            worldReadyAfterSend(event, this.mapperManager.beginWorld(target, entityId));
+        } else if (event.getPacketType() == PacketType.Play.Server.RESPAWN) {
+            worldReadyAfterSend(event, this.mapperManager.beginWorld(target, this.mapperManager.selfEntityId(target)));
+        } else if (event.getPacketType() == PacketType.Play.Server.CONFIGURATION_START) {
+            // Invalidate every old-world task before configuration starts.
+            this.mapperManager.beginWorld(target, -1);
+        } else if (event.getPacketType() == PacketType.Play.Server.SPAWN_ENTITY
+                || event.getPacketType() == PacketType.Play.Server.SPAWN_PLAYER) {
+            // Modded entity type IDs are not necessarily present in PacketEvents' vanilla table.
+            // The UUID of an online proxy player identifies our subject without decoding that table.
+            var spawn = EntityPacketReader.spawn((ByteBuf) event.getByteBuf());
+            if (this.server.getPlayer(spawn.uuid()).isPresent()) {
+                trackAfterSend(event, target, spawn.uuid(), spawn.entityId());
             }
-        } else if (event.getPacketType() == PacketType.Play.Server.SPAWN_PLAYER) {
-            // A player entered this client's view (dimension switch / chunk load). Re-send the
-            // cached YSM model so it shows up without a manual re-select.
-            final WrapperPlayServerSpawnPlayer spawn = new WrapperPlayServerSpawnPlayer(event);
-            final Player target = event.getPlayer();
-            final byte[] modelData = this.mapperManager.getCachedModelData(spawn.getEntityId());
-            if (target != null && modelData != null) {
-                final byte[] data = modelData;
-                this.server.getScheduler().buildTask(this, () ->
-                        target.sendPluginMessage(YsmConstants.CHANNEL_KEY, data))
-                        .delay(50, TimeUnit.MILLISECONDS)
-                        .schedule();
-                this.logger.info("[Freesia] Re-broadcast model for spawned entity {} -> {}",
-                        spawn.getEntityId(), target.getUsername());
-            }
+        } else if (event.getPacketType() == PacketType.Play.Server.DESTROY_ENTITIES) {
+            final var view = this.mapperManager.currentView(target);
+            final int[] ids = EntityPacketReader.destroyed((ByteBuf) event.getByteBuf());
+            event.getPostTasks().add(() -> {
+                if (!event.isCancelled()) this.mapperManager.untrack(view, ids);
+            });
         }
+        } catch (RuntimeException ex) {
+            // Observation failure must never cancel or replace a backend's packet.
+            this.logger.warn("[Freesia] Could not observe entity packet {}; leaving original bytes unchanged",
+                    event.getPacketType(), ex);
+        }
+    }
+
+    private void worldReadyAfterSend(PacketSendEvent event, MapperManager.View view) {
+        // Velocity's PacketEvents 2.8 encoder executes postTasks, not tasksAfterSend.
+        final var user = event.getUser();
+        event.getPostTasks().add(() -> {
+            if (event.isCancelled()) return;
+            // Bounded retries cover client world initialization; each reads the newest model.
+            for (long delay : new long[]{100, 500, 1500, 3000}) {
+                this.server.getScheduler().buildTask(this, () -> {
+                    if (user.getEncoderState() != ConnectionState.PLAY) return;
+                    this.mapperManager.markReady(view);
+                    this.mapperManager.replay(view);
+                })
+                        .delay(delay, TimeUnit.MILLISECONDS).schedule();
+            }
+        });
+    }
+
+    private void trackAfterSend(PacketSendEvent event, Player viewer, UUID owner, int entityId) {
+        MapperManager.View view = this.mapperManager.currentView(viewer);
+        event.getPostTasks().add(() -> {
+            if (event.isCancelled()) return;
+            long revision = this.mapperManager.trackForReplay(view, owner, entityId);
+            if (revision < 0) return;
+            for (long delay : new long[]{50, 250, 1000, 3000}) {
+                this.server.getScheduler().buildTask(this, () -> this.mapperManager.replayTracked(view, owner, revision))
+                        .delay(delay, TimeUnit.MILLISECONDS).schedule();
+            }
+        });
     }
 
     @Subscribe

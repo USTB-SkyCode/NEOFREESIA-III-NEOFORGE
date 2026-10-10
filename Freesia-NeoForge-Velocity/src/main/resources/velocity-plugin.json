@@ -1,7 +1,7 @@
 {
   "id": "freesianeo",
   "name": "Freesia NeoForge",
-  "version": "1.0.0",
+  "version": "1.0.3-diagnostic",
   "description": "Freesia II-like YSM proxy for NeoForge 1.21.1: routes yes_steve_model packets through a Worker node with entity-id remapping.",
   "authors": [
     "Freesia NeoForge contributors"

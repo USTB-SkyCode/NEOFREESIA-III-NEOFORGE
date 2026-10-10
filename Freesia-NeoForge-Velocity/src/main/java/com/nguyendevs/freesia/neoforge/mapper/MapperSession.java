@@ -23,6 +23,11 @@ import org.geysermc.mcprotocollib.protocol.packet.common.serverbound.Serverbound
 import org.geysermc.mcprotocollib.protocol.packet.common.serverbound.ServerboundKeepAlivePacket;
 import org.geysermc.mcprotocollib.protocol.packet.common.serverbound.ServerboundPongPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.ClientboundLoginPacket;
+import com.nguyendevs.freesia.neoforge.util.BufUtil;
+import io.netty.buffer.Unpooled;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A fake vanilla client connection from the proxy to the Worker node (NeoForge 1.21.1 + YSM).
@@ -44,6 +49,37 @@ public class MapperSession implements SessionListener {
     private volatile TcpClientSession session;
     private volatile int workerEntityId = -1;
     private volatile int backendEntityId = -1;
+    private final long started = System.nanoTime();
+    private volatile boolean tcpConnected, closed, s2cHandshake, c2sHandshake;
+    private volatile String lastReceived = "none", lastSent = "none";
+    private final Set<String> stages = ConcurrentHashMap.newKeySet();
+    private final AtomicInteger receivedYsm = new AtomicInteger(), sentYsm = new AtomicInteger();
+
+    private void stage(String message) {
+        if (stages.add(message)) this.manager.getLogger().info("[Freesia-DIAG] player={} {}",
+                this.player.getUsername(), message);
+    }
+
+    public void reportStatus() {
+        if (closed || !player.isActive()) return;
+        this.manager.getLogger().info("[Freesia-DIAG] STATUS {}", diagnosticStatus());
+    }
+
+    public String diagnosticStatus() {
+        String waiting = !tcpConnected ? "TCP_CONNECT" : workerEntityId < 0 ? "MINECRAFT_LOGIN_OR_CONFIGURATION"
+                : !s2cHandshake ? "WORKER_YSM_HANDSHAKE" : !c2sHandshake ? "CLIENT_YSM_REPLY" : "YSM_HANDSHAKE_OBSERVED";
+        return "player=" + player.getUsername() + " endpoint=" + host + ":" + port
+                + " elapsedMs=" + (System.nanoTime()-started)/1_000_000 + " closed=" + closed
+                + " stage=" + waiting + " lastRx=" + lastReceived + " lastTx=" + lastSent
+                + " ysmRx=" + receivedYsm.get() + " ysmTxConfirmed=" + sentYsm.get();
+    }
+
+    private int packetId(byte[] data) {
+        var buf = Unpooled.wrappedBuffer(data);
+        try { return BufUtil.readVarInt(buf); }
+        catch (RuntimeException ex) { return -1; }
+        finally { buf.release(); }
+    }
 
     public MapperSession(Player player, MapperManager manager, String host, int port) {
         this.player = player;
@@ -54,6 +90,8 @@ public class MapperSession implements SessionListener {
     }
 
     public void connect() {
+        this.manager.getLogger().info("[Freesia] Worker CONNECTING player={} endpoint={}:{}",
+                this.player.getUsername(), this.host, this.port);
         final MinecraftProtocol protocol = new MinecraftProtocol(
                 new GameProfile(this.player.getUniqueId(), this.player.getUsername()), null);
         this.session = new TcpClientSession(this.host, this.port, protocol);
@@ -65,9 +103,16 @@ public class MapperSession implements SessionListener {
 
     @Override
     public void packetReceived(Session session, Packet packet) {
+        lastReceived = packet.getClass().getSimpleName();
+        if (packet.getClass().getPackageName().contains(".login.")
+                || packet.getClass().getPackageName().contains(".configuration.")) {
+            stage("WORKER_RX " + lastReceived);
+        }
         if (packet instanceof ClientboundLoginPacket loginPacket) {
             this.workerEntityId = loginPacket.getEntityId();
             this.manager.onWorkerEntityId(this, this.workerEntityId);
+            this.manager.getLogger().info("[Freesia] Worker PLAY_READY player={} entity={}",
+                    this.player.getUsername(), this.workerEntityId);
             return;
         }
 
@@ -84,20 +129,25 @@ public class MapperSession implements SessionListener {
 
         if (packet instanceof ClientboundCustomPayloadPacket payloadPacket) {
             final String channel = payloadPacket.getChannel().asString();
-            this.manager.getLogger().info("[Freesia] Received custom payload channel: " + channel);
+            stage("WORKER_CHANNEL " + channel);
             if (channel.equals(YsmConstants.CHANNEL)) {
                 final byte[] data = payloadPacket.getData();
+                receivedYsm.incrementAndGet();
+                int id = packetId(data);
+                if (id == YsmConstants.S2C_HANDSHAKE) s2cHandshake = true;
+                stage("YSM_WORKER_RX packetId=" + id);
                 final YsmPacketProxy.Result result = this.proxy.processS2C(data);
                 switch (result.kind()) {
                     case MODIFY -> {
-                        this.player.sendPluginMessage(YsmConstants.CHANNEL_KEY, result.data());
-                        if (result.broadcast()) {
-                            // Fallback: broadcast this entity-state packet to every other online player.
-                            this.manager.broadcastToOthers(this.player.getUniqueId(), result.data());
-                        }
+                        boolean sent = this.player.sendPluginMessage(YsmConstants.CHANNEL_KEY, result.data());
+                        stage("YSM_CLIENT_SEND packetId=" + id + " accepted=" + sent);
                     }
-                    case PASS -> this.player.sendPluginMessage(YsmConstants.CHANNEL_KEY, data);
+                    case PASS -> {
+                        boolean sent = this.player.sendPluginMessage(YsmConstants.CHANNEL_KEY, data);
+                        stage("YSM_CLIENT_SEND packetId=" + id + " accepted=" + sent);
+                    }
                     case DROP -> {
+                        stage("YSM_ROUTER_CONSUMED packetId=" + id + " (entity packets routed separately)");
                     }
                 }
             }
@@ -110,14 +160,26 @@ public class MapperSession implements SessionListener {
 
     @Override
     public void packetSent(Session session, Packet packet) {
+        lastSent = packet.getClass().getSimpleName();
+        if (packet.getClass().getPackageName().contains(".login.")
+                || packet.getClass().getPackageName().contains(".configuration.")) stage("WORKER_TX " + lastSent);
+        if (packet instanceof ServerboundCustomPayloadPacket payload && payload.getChannel().equals(YSM_KEY)) {
+            sentYsm.incrementAndGet();
+            stage("YSM_WORKER_TX_CONFIRMED packetId=" + packetId(payload.getData()));
+        }
     }
 
     @Override
     public void packetError(PacketErrorEvent event) {
+        this.manager.getLogger().error("[Freesia-DIAG] {}", diagnosticStatus());
+        this.manager.getLogger().error("[Freesia] Worker PACKET_ERROR player=" + this.player.getUsername(), event.getCause());
     }
 
     @Override
     public void connected(ConnectedEvent event) {
+        tcpConnected = true;
+        this.manager.getLogger().info("[Freesia] Worker TCP_CONNECTED player={} (Minecraft/YSM login not yet confirmed)",
+                this.player.getUsername());
     }
 
     @Override
@@ -126,14 +188,23 @@ public class MapperSession implements SessionListener {
 
     @Override
     public void disconnected(DisconnectedEvent event) {
+        closed = true;
+        this.manager.getLogger().warn("[Freesia-DIAG] {}", diagnosticStatus());
+        this.manager.getLogger().warn("[Freesia] Worker DISCONNECTED player={} endpoint={}:{} reason={}",
+                this.player.getUsername(), this.host, this.port, event.getReason());
+        if (event.getCause() != null) this.manager.getLogger().error("[Freesia] Worker disconnect cause", event.getCause());
         this.manager.removeSession(this);
     }
 
     /** Relays a client -> Worker YSM packet. */
     public void relayC2S(byte[] data) {
+        int id = packetId(data);
+        if (id == YsmConstants.C2S_HANDSHAKE) c2sHandshake = true;
+        stage("YSM_CLIENT_RX packetId=" + id);
         final YsmPacketProxy.Result result = this.proxy.processC2S(data);
         final TcpClientSession s = this.session;
-        if (s == null) {
+        if (s == null || !s.isConnected()) {
+            this.manager.getLogger().warn("[Freesia-DIAG] YSM_C2S_NOT_SENT packetId={} {}", id, diagnosticStatus());
             return;
         }
         switch (result.kind()) {

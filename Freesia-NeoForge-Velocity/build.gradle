@@ -4,7 +4,8 @@ plugins {
 }
 
 group = 'com.nguyendevs.freesia'
-version = '1.0.0'
+// Keep in sync with src/main/resources/velocity-plugin.json.
+version = '1.0.3-diagnostic'
 
 base {
     archivesName = 'Freesia-NeoForge-Velocity'
@@ -30,14 +31,20 @@ dependencies {
     compileOnly 'com.velocitypowered:velocity-api:3.3.0-SNAPSHOT'
     compileOnly 'io.netty:netty-all:4.1.115.Final'
     compileOnly 'org.slf4j:slf4j-api:2.0.13'
-    // PacketEvents (separate Velocity plugin) — used to read the backend JOIN_GAME entity id.
-    compileOnly 'com.github.retrooper:packetevents-velocity:2.8.0'
+    // PacketEvents (separate Velocity plugin) — used to observe backend entity packets.
+    // 1.0.3-diagnostic is built against 2.13.0 (the version deployed alongside it).
+    compileOnly 'com.github.retrooper:packetevents-velocity:2.13.0'
 
     // Bundled: MCPRotocolLib lets the proxy connect to the Worker as a vanilla fake client.
     implementation 'org.geysermc.mcprotocollib:protocol:1.21-SNAPSHOT'
 
     // Bundled: TOML config parser.
     implementation 'com.electronwill.night-config:toml:3.6.6'
+
+    // Normally provided by Velocity at runtime; the offline regression suite needs them on the
+    // test classpath because `compileOnly` dependencies are not part of testRuntimeClasspath.
+    testImplementation 'com.velocitypowered:velocity-api:3.3.0-SNAPSHOT'
+    testImplementation 'org.slf4j:slf4j-api:2.0.13'
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -52,4 +59,27 @@ shadowJar {
 
 tasks.named('build') {
     dependsOn tasks.named('shadowJar')
+}
+
+// ---------------------------------------------------------------------------
+// Regression suite
+// ---------------------------------------------------------------------------
+// SwitchRegressionTest is a plain `main()` program (no JUnit dependency): it drives the real
+// MapperManager / YsmPacketProxy through in-memory Velocity interface stubs. Run it with
+// `gradlew regressionTest`; `gradlew check` depends on it.
+tasks.named('test') {
+    // No JUnit test sources in this project; the suite below is the actual verification entry point.
+    enabled = false
+}
+
+tasks.register('regressionTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs SwitchRegressionTest against the compiled plugin classes.'
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'SwitchRegressionTest'
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('regressionTest')
 }

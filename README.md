@@ -112,6 +112,51 @@ cd freesianeoforgeworker-1.21.1
 copy gradle-local.properties.example gradle-local.properties   # 按需填写代理
 ```
 
+---
+
+## 发布 Release
+
+推一个 `v*` 形式的 tag 就会自动创建 GitHub Release，并把两个 jar 挂成附件：
+
+```shell
+git tag v1.0.3
+git push origin v1.0.3
+```
+
+分支 push 和 PR **只跑构建、不发 Release**（release job 的 `if` 限定 `refs/tags/v*`）。
+
+Release 由工作流里的第三个 job 完成，它 `needs` 两个构建 job，
+所以**任一组件编译失败就不会发布** —— 否则会发出一个附件残缺的 Release。
+tag 形如 `v1.0.3-beta` 时自动标记为 prerelease。
+
+### 发版前请先统一版本号
+
+**这是最容易出错的地方：两个组件是各自独立版本化的，分处三个文件：**
+
+| 位置 | 当前值 | 说明 |
+|---|---|---|
+| `Freesia-NeoForge-Velocity/build.gradle` | `1.0.3-diagnostic` | 插件 jar 档名 |
+| `Freesia-NeoForge-Velocity/src/main/resources/velocity-plugin.json` | `1.0.3-diagnostic` | **Velocity 运行时读的是这个**，与上面必须一致 |
+| `freesianeoforgeworker-1.21.1/gradle.properties` (`mod_version`) | `1.0.0` | Worker mod jar 档名 |
+
+tag 名**不需要**等于 jar 里的版本号（tag 只是 Release 的名字），
+但要清楚：打 `v1.0.3` 发出来的附件仍叫 `freesianeoforgeworker-1.0.0.jar`。
+若希望 tag 与产物对得上，发版前需手动 bump 上面这些值。
+
+`build.gradle` 里已注明 `version` 要和 `velocity-plugin.json` 保持一致；
+两处不一致时 Velocity 加载的版本会与文件名称不符，排查起来很费时间。
+
+### 附件里不会出现的东西
+
+Release 只挂**可部署的两个 jar**，自动排除：
+
+- `*-thin.jar` —— Velocity 的薄 jar（未打包依赖，部署即 `NoClassDefFoundError`）；
+- `*-sources.jar` —— Worker 的源码包。
+
+工作流在发布前会分别校验两个 jar 各存在且唯一，缺一个就整个 job 失败，
+避免发出残缺 Release。**注意：GitHub Release 一旦发布，下载者看到的就是最终结果**，
+所以这里采取「宁可失败也不发残包」。
+
 ### 验证边界
 
 工作流只证明**代码能编译、打包，且 45 项回归断言通过**。

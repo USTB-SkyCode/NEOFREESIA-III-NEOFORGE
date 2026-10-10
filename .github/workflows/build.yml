@@ -142,3 +142,91 @@ jobs:
             freesianeoforgeworker-1.21.1/build/libs/*.jar
             !freesianeoforgeworker-1.21.1/build/libs/*-sources.jar
           if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3) 打 tag 时创建 GitHub Release，并把两个 jar 挂成下载附件
+  # ---------------------------------------------------------------------------
+  # 发版流程：先 bump 版本号并提交，再打 tag 推送。
+  #   git tag v1.0.3 && git push origin v1.0.3
+  # 只有 refs/tags/v* 会走到这里；日常分支 push 与 PR 只跑构建，不发 Release。
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    # 必须等两个构建都成功，否则会出现「Release 已发布但附件缺失」。
+    needs: [velocity-plugin, worker-mod]
+    runs-on: ubuntu-latest
+    permissions:
+      # workflow 顶层是 contents: read（最小权限），创建 Release 需要写权限，
+      # 因此只在这一个 job 上单独提权。
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # 不指定 name 时会把所有 artifact 各下到一个以 artifact 名命名的子目录：
+          #   dist/Freesia-NeoForge-Velocity/*.jar
+          #   dist/freesianeoforgeworker/*.jar
+          path: dist
+
+      - name: List artifacts
+        run: find dist -type f | sort
+
+      # 与构建阶段的思路一致：宁可在这里失败，也不要发一个附件残缺的 Release，
+      # 因为 GitHub Release 一旦发布，下载者很难知道少东西。
+      - name: Verify both jars are present
+        run: |
+          set -euo pipefail
+          find dist -type f | sort
+
+          # 分别统计两个产物，而不是只看「总数等于 2」：
+          # 总数相等但恰好是一个插件 jar 被上传两次时，总数检查会误判为通过。
+          vel=$(find dist -name 'Freesia-NeoForge-Velocity-*.jar' ! -name '*-thin.jar')
+          wrk=$(find dist -name 'freesianeoforgeworker-*.jar' ! -name '*-sources.jar')
+
+          for pair in "Velocity|$vel" "Worker|$wrk"; do
+            name=${pair%%|*}
+            files=${pair#*|}
+            if [ -z "$files" ]; then
+              echo "::error::缺少 $name 的 jar。"
+              exit 1
+            fi
+            n=$(echo "$files" | wc -l)
+            if [ "$n" -ne 1 ]; then
+              echo "::error::$name 期望 1 个 jar，实际 $n 个："
+              echo "$files"
+              exit 1
+            fi
+            echo "OK $name: $files"
+          done
+          echo "两个 jar 都在，可以发 Release。"
+
+      - name: Create GitHub Release
+        env:
+          # runner 自带 gh CLI，无需第三方 action。
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 这个 job 没有 actions/checkout，因此工作目录里没有 .git，
+          # gh 无法从 git remote 推断仓库，必须显式指定，否则会报
+          # "not a git repository"。
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # --verify-tag: tag 不存在就直接失败，避免建出一个指向错误提交的 Release。
+          # --generate-notes: 让 GitHub 按提交历史自动生成发布说明。
+          # 形如 v1.0.3-beta 的 tag 自动标为预发布，避免用户把测试版当稳定版下载。
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+          # 只挂可部署的那两个 jar：排除 Velocity 的 *-thin.jar（未打包依赖）
+          # 与 Worker 的 *-sources.jar（源码包）。否则用户会看到
+          # 四五个附件、不知道下哪个，甚至下到不可用的薄 jar。
+          jars=$(find dist -name '*.jar' ! -name '*-thin.jar' ! -name '*-sources.jar' | sort)
+          echo "将上传以下附件："
+          echo "$jars"
+
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease \
+            $jars

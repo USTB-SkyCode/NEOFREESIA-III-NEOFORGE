@@ -7,7 +7,15 @@ on:
     branches: ['**']
     tags: ['v*']
   pull_request:
+  # 手动触发。tag 留空 = 只构建；填一个已存在的 tag = 重发/补发 Release。
+  # 之所以留这个口子：release job 一旦失败（比如网络问题），
+  # 否则就只能删掉 tag 再重新推一次，很麻烦。
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag 名（例如 v1.0.3）。留空则只构建，不发 Release。'
+        required: false
+        type: string
 
 # 同一分支连续推送时，取消上一次尚未跑完的构建，避免排队浪费额度。
 concurrency:
@@ -151,7 +159,14 @@ jobs:
   # 只有 refs/tags/v* 会走到这里；日常分支 push 与 PR 只跑构建，不发 Release。
   release:
     name: Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # 两种入口：
+    #   1) 推了 v* tag（正常发版）
+    #   2) 手动触发并填了 tag（重发/补发）
+    # 注意：手动触发时 github.ref 是分支（refs/heads/main），
+    # 所以不能只判断 ref，否则手动触发的 Release 会被 skip 掉。
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     # 必须等两个构建都成功，否则会出现「Release 已发布但附件缺失」。
     needs: [velocity-plugin, worker-mod]
     runs-on: ubuntu-latest
@@ -160,6 +175,33 @@ jobs:
       # 因此只在这一个 job 上单独提权。
       contents: write
     steps:
+      - name: Resolve release tag
+        id: tag
+        env:
+          # 手动触发时用输入的 tag；tag 推送时 github.ref_name 就是 tag 名。
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          echo "本次要发布的 tag: $tag"
+          # 这里只做「非空」与「v 开头」的粗校验，
+          # tag 是否真实存在交给后面的 --verify-tag 判断。
+          if [ -z "$tag" ]; then
+            echo "::error::没有解析出 tag 名。"
+            exit 1
+          fi
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::tag 必须以 v 开头（收到：$tag）。"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -208,13 +250,24 @@ jobs:
           # gh 无法从 git remote 推断仓库，必须显式指定，否则会报
           # "not a git repository"。
           GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
+          # 若该 tag 已有 Release（例如重跑工作流，或用 workflow_dispatch 补发），
+          # 改为补传附件而不是直接失败 —— gh release create 遇到已存在的 Release 会报错。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，改为上传/覆盖附件。"
+            gh release upload "$TAG" \
+              $(find dist -name '*.jar' ! -name '*-thin.jar' ! -name '*-sources.jar' | sort) \
+              --clobber
+            exit 0
+          fi
+
           # --verify-tag: tag 不存在就直接失败，避免建出一个指向错误提交的 Release。
           # --generate-notes: 让 GitHub 按提交历史自动生成发布说明。
           # 形如 v1.0.3-beta 的 tag 自动标为预发布，避免用户把测试版当稳定版下载。
           prerelease=""
-          case "${GITHUB_REF_NAME}" in
+          case "$TAG" in
             *-*) prerelease="--prerelease" ;;
           esac
           # 只挂可部署的那两个 jar：排除 Velocity 的 *-thin.jar（未打包依赖）
@@ -224,8 +277,8 @@ jobs:
           echo "将上传以下附件："
           echo "$jars"
 
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
+          gh release create "$TAG" \
+            --title "$TAG" \
             --generate-notes \
             --verify-tag \
             $prerelease \

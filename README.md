@@ -129,6 +129,37 @@ Release 由工作流里的第三个 job 完成，它 `needs` 两个构建 job，
 所以**任一组件编译失败就不会发布** —— 否则会发出一个附件残缺的 Release。
 tag 形如 `v1.0.3-beta` 时自动标记为 prerelease。
 
+### Release job 显示 skipped 是正常的
+
+**只推分支、不打 tag 时，Release job 一定会被 skip，这不是故障。**
+
+它的条件是 `startsWith(github.ref, 'refs/tags/v')`，
+而分支 push 时 `github.ref` 是 `refs/heads/main`，条件为 false。
+判据是看构建运行页里 **release job 的结论是 `skipped` 而不是 `failure`**；
+如果是 `failure` 才是真的出问题。
+
+要发 Release，必须真的把 tag 推到远端：
+
+```shell
+git tag v1.0.3
+git push origin v1.0.3        # 这一步不能省，只在本机打 tag 不会触发 CI
+```
+
+推 tag 后 GitHub 会**另起一次**工作流运行（event 为 `push`、ref 为 tag），
+那次运行里 release job 才会实际执行。
+
+### 手动重发 Release
+
+release job 失败时（比如网络抖动）不必删 tag 重推：
+在 Actions 页面选 **Run workflow**，在 `tag` 输入框填已存在的 tag 名（如 `v1.0.3`），
+它会重跑构建并补发/覆盖该 Release 的附件。
+
+`workflow_dispatch` 手动触发时 `github.ref` 指向分支而非 tag，
+因此 release job 的 `if` 额外接受「手动触发且填了 tag」这一入口，
+并在 job 内解析出真正的 tag 名（`Resolve release tag` 步骤）。
+tag 必须 `v` 开头，是否存在由 `gh release create --verify-tag` 判定。
+若该 tag 已有 Release，则改为 `gh release upload --clobber` 覆盖附件。
+
 ### 发版前请先统一版本号
 
 **这是最容易出错的地方：两个组件是各自独立版本化的，分处三个文件：**
